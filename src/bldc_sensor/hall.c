@@ -58,7 +58,9 @@ ISR( HALL_AC_vect )  //Hall_A & Hall_C share the same interrupt vector byte
 ISR( HALL_B_vect )
 {
   psc_commutateOutputWaveforms( pid_dutyCycle_get() );
-
+  #ifdef DEBUG_OUTPUT_WANTED
+  static uint8_t pinState=0;
+  #endif
   uint8_t hallB_state = 0;
   static uint8_t hallB_state_previous = 0;
 
@@ -71,8 +73,21 @@ ISR( HALL_B_vect )
     if(hallB_state_previous == HALL_B_LOW) 
     {
       //rising edge just occurred on Hall B
-      timing_calculateRPM();
-	  pid_dutyCycle_calculate();
+      int16_t timerCount = (int16_t)timing_calculateRPM();
+	  
+	  #ifdef DEBUG_OUTPUT_WANTED
+		  if(pinState==0)
+		  {
+			  unoPinA2_high();
+			  pinState=1;
+		  }
+		  else
+		  {
+			  unoPinA2_low();
+			  pinState=0;
+		  }
+	  #endif
+		
     }
   }
 

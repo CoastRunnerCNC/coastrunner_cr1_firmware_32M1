@@ -1,109 +1,93 @@
 #include "grBLDC.h"
+#include <stdio.h>
+
 
 //Spindle RPM PID controller
+int32_t errorPrevious=0; // Previous error
+int32_t errorAcc=0; // Accumulated error
+int32_t errorAccMax = 4177920/PID_COEFF_I;
+uint8_t dutyPID = 0; //Closed loop PSC PWM Duty Cycle //0:255
 
-#ifdef SPINDLE_MODE_OPEN_LOOP
-	uint8_t dutyPID = OPEN_LOOP_STATIC_PSC_DUTY_CYCLE;
-#elif defined SPINDLE_MODE_CLOSED_LOOP
-	uint8_t dutyPID = 0; //Closed loop PSC PWM Duty Cycle //0:255
-#else 
-#endif
-
-////////////////////////////////////////////////////////////////////////////////////////
-
+// Getter/setter for PID
 uint8_t pid_dutyCycle_get() { return dutyPID; }
-void pid_dutyCycle_set(uint8_t newDuty) { dutyPID = newDuty; } 
+void pid_dutyCycle_set(uint8_t newDuty) { dutyPID = newDuty; }
 
-////////////////////////////////////////////////////////////////////////////////////////
-
-int16_t pid_calculate_proportional(int16_t speedError)
+// Actual PID algorithm
+uint8_t pid_update(int16_t error,int16_t dt)
 {
-  return (SPEED_PID_PROPERTIONAL_COEF * speedError);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////
-
-int16_t pid_calculate_integral(int16_t speedError)
-{
-  static int16_t speed_integrator = 0;
-
-  speed_integrator += speedError;
-
-  if(speed_integrator >  255) { speed_integrator =  255; }
-  if(speed_integrator < -255) { speed_integrator = -255; }
-
-  return (SPEED_PID_INTEGRAL_COEF * speed_integrator);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////
-
-int16_t pid_calculate_derivative(int16_t speedError)
-{
-  static int16_t speedError_previous = 0;
-
-  int16_t speed_derivative = (speedError - speedError_previous);
-  speedError_previous = speedError;
-
-  if(speed_derivative >  255) speed_derivative =  255;
-  if(speed_derivative < -255) speed_derivative = -255;
-
-  return (SPEED_PID_DIFFERENTIAL_COEF * speed_derivative);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////
-
-uint8_t pid_dutyCycle_calculate(void)
-{
-  #ifdef SPINDLE_MODE_CLOSED_LOOP 
-    static int16_t summedPID = 0;
-
-    if(adc_goalRPM_get() > MIN_ALLOWED_RPM)
-    { 
-      int16_t error_actualMinusGoal_RPM = (int16_t)timing_measuredRPM_get() - (int16_t)adc_goalRPM_get();
-
-      if(error_actualMinusGoal_RPM > 0) { summedPID--; }
-      else                              { summedPID++; }
-
-      //int16_t TermPID_proportional = pid_calculate_proportional(speedError);
-      //int16_t TermPID_integral     = pid_calculate_integral    (speedError);
-      //int16_t TermPID_derivative   = pid_calculate_derivative  (speedError);
-
-      // Duty Cycle calculation
-      //summedPID = TermPID_proportional + TermPID_integral + TermPID_derivative;
-      //summedPID = error_actualRPM_minus_goalRPM;
-
-      // Bound max/min PWM value
-      if     ( summedPID > (int16_t)(255) ) { summedPID = 255; }
-      else if( summedPID < (int16_t)(125) ) { summedPID = 125; }
-      
-      dutyPID = summedPID;
-    }
-    else //(adc_goalRPM_get() < MIN_ALLOWED_RPM)
-    {
-      summedPID = 0;
-	  dutyPID = summedPID;
-	  
-      motor_stop(); //turn off output stage
-    }
-
-  #elif defined SPINDLE_MODE_OPEN_LOOP
-    dutyPID = OPEN_LOOP_STATIC_PSC_DUTY_CYCLE;
-  #endif
+	static int32_t pidFrac = 0; // Result in fractional form
+	int32_t pidInt; // Result integer part
 	
-  return dutyPID;
+  	// Accumulate error to compute I
+	errorAcc+=error*dt;
+	
+	if(errorAcc>errorAccMax)
+		errorAcc = errorAccMax;
+	
+	if(errorAcc<-errorAccMax)
+		errorAcc = -errorAccMax;
+
+	// Compute P, I and D parts
+	int32_t pVal = PID_COEFF_P*error;
+	int32_t iVal = PID_COEFF_I*errorAcc;
+	int32_t dVal = PID_COEFF_D*(error-errorPrevious)/dt;
+	
+
+	
+	// Compute PID result in fractional form
+	pidFrac = (pVal+iVal+dVal);
+	
+	if(pidFrac<0)
+		pidFrac = 0;
+
+	// Compute integer part of PID
+	pidInt = PID_MIN_VALUE+(pidFrac>>PID_COEF_SCALE_LOG2);
+	
+  // Bound min/max values of control
+	if(pidInt > PID_MAX_VALUE)
+	pidInt = PID_MAX_VALUE;
+	if(pidInt < PID_MIN_VALUE)
+	pidInt = PID_MIN_VALUE;
+	
+	return (uint8_t) pidInt;
 }
 
-////////////////////////////////////////////////////////////////////////////////////////
+// Reset PID static parameters
+void pid_reset()
+{
+	errorPrevious=0;
+	errorAcc=0;
+}
 
+void pid_loop(int16_t dt)
+{
+    #ifdef SPINDLE_MODE_CLOSED_LOOP
+    if(adc_goalRPM_get() > MIN_ALLOWED_RPM)
+    {
+	    int16_t error = (int16_t)adc_goalRPM_get()-(int16_t)timing_measuredRPM_get();
+	    dutyPID = pid_update(error,dt);
+    }
+    else
+    {
+	    pid_reset();
+	    dutyPID=0;
+	    motor_stop();
+    }
+    #elif defined SPINDLE_MODE_OPEN_LOOP
+    dutyPID = OPEN_LOOP_STATIC_PSC_DUTY_CYCLE;
+    #endif
+}
+
+// Pid scheduler: Adjusts motor control depending on error
+// Note: currently not used !
 void pid_scheduler(void)
 {
   static uint16_t timeSinceLastUpdate_PID = 0;
   
-  timeSinceLastUpdate_PID += TIMER0_INTERRUPT_PERIOD_us;
 
-  if(timeSinceLastUpdate_PID >= PID_UPDATE_PERIOD_MICROSECONDS)
+  if(++timeSinceLastUpdate_PID >= 200)
   {
-    pid_dutyCycle_calculate();
+    pid_loop(1);
     timeSinceLastUpdate_PID = 0;
   }
 }

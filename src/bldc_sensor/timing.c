@@ -55,7 +55,7 @@ ISR(TIMER1_OVF_vect)
 
 ////////////////////////////////////////////////////////////////////////////////////////
 
-inline void timing_calculateRPM(void)
+inline uint16_t timing_calculateRPM(void)
 {
   uint16_t timerCount = TCNT1; //retrieve 16b timer value
   TCNT1 = 0; //reset Timer 1 ASAP (to minimize jitter)
@@ -104,6 +104,7 @@ inline void timing_calculateRPM(void)
   #else
     timing_measuredRPM_set(spindleRPM_measured); 
   #endif
+  return timerCount;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
